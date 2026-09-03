@@ -320,10 +320,6 @@ import os
 import pandas as pd
 from openpyxl.utils import get_column_letter
 
-# ==============================================================================
-# 1. FILE HANDLING & OUTPUT INITIALIZATION
-# ==============================================================================
-
 excel_filename = (
     f"2_CHP_Load_{round(hourly_demand.values.sum(), ndigits=2)}_{config.SIMULATION_YEAR}_digester{config.DIGESTER_CONSTANT_OUTPUT_MW}_bess_{config.BESS_CAPACITY_MWH}_{config.BESS_POWER_MWH}_panels_{config.NUMBER_OF_PANELS}.xlsx"
 )
@@ -333,9 +329,6 @@ print(
     f"Compiling convention-adjusted annual report into: {excel_filename}..."
 )
 
-# ==============================================================================
-# 2. EXTRACT ELECTRICAL & RENEWABLE TIME-SERIES
-# ==============================================================================
 actual_pv_kw = n.generators_t.p.loc[:, "PV_System"] * 1000
 theoretical_pv_kw = (
         n.generators_t.p_max_pu.loc[:, "PV_System"]
@@ -344,10 +337,8 @@ theoretical_pv_kw = (
 )
 curtailment_profile_kw = theoretical_pv_kw - actual_pv_kw
 
-# --- UNIFIED INFRASTRUCTURE ELECTRICAL SURPLUS EXTRACTION ---
 electrical_surplus_dump_kw = n.links_t.p0.loc[:, "Electrical_Emergency_Dump"] * 1000
 
-# --- BESS LINK-STORE-LINK CONVERSION LAYER ---
 raw_soc_series = n.stores_t.e.loc[:, "BESS_reservoir"]
 physical_soc_kwh = raw_soc_series * 1000
 physical_soc_pct = (raw_soc_series / config.BESS_CAPACITY_MWH) * 100.0
@@ -355,10 +346,6 @@ physical_soc_pct = (raw_soc_series / config.BESS_CAPACITY_MWH) * 100.0
 bess_charging_kw = n.links_t.p0.loc[:, "BESS_charger"] * 1000
 bess_discharging_kw = -1 * n.links_t.p1.loc[:, "BESS_discharger"] * 1000
 bess_raw_power_kw = (bess_charging_kw * -1) + bess_discharging_kw
-
-# ==============================================================================
-# 3. MASS BALANCE GAS & THERMAL ROUTING CALCULATION
-# ==============================================================================
 
 biogas_produced_kw = n.generators_t.p.loc[:, "Digester_Biogas_Output"] * 1000
 biogas_consumed_chp1_kw = n.links_t.p0.loc[:, "CHP_Biogas_Generator"] * 1000
@@ -382,10 +369,6 @@ biogas_mass_balance_error_kw = (
         - (biogas_consumed_chp1_kw + biogas_consumed_chp2_kw + biogas_heater_consumed_kw + biogas_vented_kw + biogas_standing_losses_kw)
         - biogas_tank_store_kw
 )
-
-# ==============================================================================
-# 4. TAB 2: COMPILE THE 8,760 HOURLY DISPATCH MATRIX (STRICT SEQUENCE AUDITED)
-# ==============================================================================
 
 hourly_dispatch_df = pd.DataFrame(
     {
@@ -443,9 +426,6 @@ simplified_hourly_dispatch_df = pd.DataFrame(
     index=n.snapshots,
 ).round(2)
 
-# ==============================================================================
-# 5. TAB 1: PRE-COMPUTE DASHBOARD METRICS (CONVENTION ALIGNED)
-# ==============================================================================
 total_mwh_to_bess = bess_charging_kw.sum() / 1000
 total_mwh_from_bess = -1 * (bess_discharging_kw.sum() / 1000)
 bess_losses_mwh = total_mwh_to_bess + total_mwh_from_bess
@@ -477,10 +457,6 @@ biogas_flare_m3 = hourly_dispatch_df["Biogas_Emergency_Vented_m3_h"].sum()
 
 biogas_standing_losses_total_mwh = biogas_standing_losses_kw.sum() / 1000
 biogas_standing_losses_total_m3 = biogas_standing_losses_m3_h.sum()
-
-# ==============================================================================
-# --- CALCULATING TRUE USEFUL THERMAL ENERGY OUTPUT (MWh_thermal) ---
-# ==============================================================================
 
 boiler_useful_heat_mwh = n.links_t.p1["Biogas_Backup_Heater"].sum()
 chp1_useful_heat_mwh = n.links_t.p2["CHP_Biogas_Generator"].sum()
