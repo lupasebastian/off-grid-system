@@ -1,0 +1,8 @@
+fastapi[standard]==0.141.1
+pandas==3.0.5
+highspy==1.15.1
+pvlib==0.15.2
+openmeteo_requests==1.7.5
+openmeteo_sdk==1.27.2
+openpyxl==3.1.5
+pypsa==1.2.4
