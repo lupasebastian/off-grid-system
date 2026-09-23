@@ -1,5 +1,4 @@
 import io
-import os
 
 from pandas import date_range, Series, DataFrame, ExcelWriter
 import datetime
@@ -132,8 +131,6 @@ class SystemFeasibilityService:
         n.add("Bus", "Biogas_Bus", carrier="biogas")
 
         n.add("Carrier", "biogas", co2_emissions=0.0)
-
-        DIGESTER_VOLUME_M3 = 1000
 
         hourly_digester_heat = generate_digester_thermal_load(
             snapshots=n.snapshots,
@@ -311,8 +308,6 @@ class SystemFeasibilityService:
         print(f"Solver Termination Condition: {condition}")
 
         # TODO REPORT REPORT REPORT REPORT REPORT REPORT REPORT REPORT REPORT REPORT REPORT REPORT REPORT
-
-        os.makedirs("generation_profiles", exist_ok=True)
 
         actual_pv_kw = n.generators_t.p.loc[:, "PV_System"] * 1000
         theoretical_pv_kw = (
