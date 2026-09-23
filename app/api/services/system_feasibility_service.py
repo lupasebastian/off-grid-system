@@ -1,9 +1,13 @@
-from pandas import date_range, Series
-import datetime
+import io
+import os
 
-import config
+from pandas import date_range, Series, DataFrame, ExcelWriter
+import datetime
+from openpyxl.utils import get_column_letter
 from pypsa import Network
 
+from app.api.schemas.prediction_schemas import PredictionRequest
+from app.api.schemas.report_schemas import SystemFeasibilityRequest
 from app.api.services.prediction_service import SolarPredictionService
 from app.utils.global_utils import generate_demand, generate_digester_thermal_load
 
@@ -11,21 +15,23 @@ class SystemFeasibilityService:
     def __init__(self, solar_prediction_service: SolarPredictionService):
         self.solar_prediction_service = solar_prediction_service
 
-    async def get_report(self):
+    async def get_feasibility_report(self, payload: SystemFeasibilityRequest):
         # TODO network setup
         # initialize network
         n = Network(name='off_grid')
 
         # set hourly snapshots for a whole year in question
         sim_start = datetime.datetime.combine(
-            datetime.datetime.now().replace(day=1, month=1, year=config.SIMULATION_YEAR), datetime.time.min)
+            datetime.datetime.now().replace(day=1, month=1, year=payload.simulation_year), datetime.time.min)
         sim_end = datetime.datetime.combine(sim_start.replace(month=12, day=31), datetime.time.max).replace(
             microsecond=0)
         n.set_snapshots(date_range(start=sim_start, end=sim_end, freq='h'))
 
         # TODO ELECTRICITY ELECTRICITY ELECTRICITY ELECTRICITY ELECTRICITY ELECTRICITY ELECTRICITY
 
-        hourly_demand = generate_demand(snapshots=n.snapshots)
+        hourly_demand = generate_demand(snapshots=n.snapshots,
+                                        demand_per_building_mwh_annually=payload.demand_per_building_mwh_annually,
+                                        num_buildings=payload.num_buildings)
 
         n.add("Bus", "Electricity_Bus", carrier="AC")
 
@@ -42,7 +48,7 @@ class SystemFeasibilityService:
             "Store",
             "BESS_reservoir",
             bus="BESS_DC_Bus",
-            e_nom=config.BESS_CAPACITY_MWH,
+            e_nom=payload.bess_capacity_mwh,
             e_min_pu=0.15,
             e_max_pu=0.95,
             e_cyclic=True,
@@ -54,7 +60,7 @@ class SystemFeasibilityService:
             "BESS_charger",
             bus0="Electricity_Bus",
             bus1="BESS_DC_Bus",
-            p_nom=config.BESS_POWER_MWH,
+            p_nom=payload.bess_power_mwh,
             efficiency=0.95,
             p_nom_extendable=False,
             p_max_pu=1.0,
@@ -67,7 +73,7 @@ class SystemFeasibilityService:
             "BESS_discharger",
             bus0="BESS_DC_Bus",
             bus1="Electricity_Bus",
-            p_nom=config.BESS_POWER_MWH,
+            p_nom=payload.bess_power_mwh,
             efficiency=0.95,
             p_nom_extendable=False,
             p_max_pu=1.0,
@@ -76,11 +82,10 @@ class SystemFeasibilityService:
         )
 
         # attach pv Generator with predicted output
-        solar_profile_raw = self.solar_prediction_service.get_pvlib_prediction(start=sim_start, end=sim_end)
-        # with pd.option_context('display.max_rows', None, 'display.max_columns', None):
-        #     print(solar_profile_raw.head(n=100))
+        prediction_request = PredictionRequest(**payload.model_dump())
+        solar_profile_raw = await self.solar_prediction_service.get_pvlib_prediction(payload=prediction_request)
 
-        true_farm_size_mw = config.PANEL_POWER_WATTS * config.NUMBER_OF_PANELS / 1000000
+        true_farm_size_mw = payload.panel_power_watts * payload.number_of_panels / 1000000
 
         # pv prediction is converted to efficiency ratio at given snapshots
         normalized_weather_shape = (solar_profile_raw / true_farm_size_mw).clip(lower=0.0, upper=1.0)
@@ -166,7 +171,7 @@ class SystemFeasibilityService:
             bus1="Heat_Bus",
             p_nom=0.35,  # huge non-realistic power, just so the energy has somewhere to vent
             p_nom_extendable=False,
-            efficiency=config.BIOGAS_BOILER_THERMAL_EFFICIENCY,
+            efficiency=payload.biogas_boiler_thermal_efficiency,
             marginal_cost=15.0,
             p_min_pu=0.0,
             p_max_pu=1.0,
@@ -179,7 +184,7 @@ class SystemFeasibilityService:
         n.add(
             "Generator", "Digester_Biogas_Output",
             bus="Biogas_Bus",
-            p_nom=config.DIGESTER_CONSTANT_OUTPUT_MW,
+            p_nom=payload.digester_constant_output_mw,
             p_max_pu=1.0,
             p_min_pu=1.0,
             p_nom_extendable=False,
@@ -232,10 +237,10 @@ class SystemFeasibilityService:
               bus0="Biogas_Bus",
               bus1="Electricity_Bus",
               bus2="Heat_Bus",
-              efficiency=config.ELECTRICAL_EFFICIENCY,
+              efficiency=payload.electrical_efficiency,
               # efficiencies based on an example of turning 120 kW of fuel into 50 kW el and 60 kW of heat
-              efficiency2=config.CHP_THERMAL_EFFICIENCY,
-              p_nom=0.05 / config.ELECTRICAL_EFFICIENCY,  # p_nom is always applied to input energy (bus0)
+              efficiency2=payload.chp_thermal_efficiency,
+              p_nom=0.05 / payload.electrical_efficiency,  # p_nom is always applied to input energy (bus0)
               p_nom_extendable=False,
               p_min_pu=chp_min_profile,
               p_max_pu=chp_max_profile,
@@ -249,10 +254,10 @@ class SystemFeasibilityService:
               bus0="Biogas_Bus",
               bus1="Electricity_Bus",
               bus2="Heat_Bus",
-              efficiency=config.ELECTRICAL_EFFICIENCY,
+              efficiency=payload.electrical_efficiency,
               # efficiencies based on an example of turning 120 kW of fuel into 50 kW el and 60 kW of heat
-              efficiency2=config.CHP_THERMAL_EFFICIENCY,
-              p_nom=0.05 / config.ELECTRICAL_EFFICIENCY,  # p_nom is always applied to input energy (bus0)
+              efficiency2=payload.chp_thermal_efficiency,
+              p_nom=0.05 / payload.electrical_efficiency,  # p_nom is always applied to input energy (bus0)
               p_nom_extendable=False,
               p_min_pu=chp_min_profile,
               p_max_pu=chp_max_profile,
@@ -279,9 +284,9 @@ class SystemFeasibilityService:
             "Link", "Diesel_Generator",
             bus0="Diesel_Bus",
             bus1="Electricity_Bus",
-            p_nom=0.05 / config.ELECTRICAL_EFFICIENCY,
+            p_nom=0.05 / payload.electrical_efficiency,
             p_nom_extendable=False,
-            efficiency=config.ELECTRICAL_EFFICIENCY,
+            efficiency=payload.electrical_efficiency,
             marginal_cost=2000.0,
             committable=True,
             p_min_pu=0.5,
@@ -307,18 +312,7 @@ class SystemFeasibilityService:
 
         # TODO REPORT REPORT REPORT REPORT REPORT REPORT REPORT REPORT REPORT REPORT REPORT REPORT REPORT
 
-        import os
-        import pandas as pd
-        from openpyxl.utils import get_column_letter
-
-        excel_filename = (
-            f"2_CHP_Load_{round(hourly_demand.values.sum(), ndigits=2)}_{config.SIMULATION_YEAR}_digester{config.DIGESTER_CONSTANT_OUTPUT_MW}_bess_{config.BESS_CAPACITY_MWH}_{config.BESS_POWER_MWH}_panels_{config.NUMBER_OF_PANELS}.xlsx"
-        )
-
         os.makedirs("generation_profiles", exist_ok=True)
-        print(
-            f"Compiling convention-adjusted annual report into: {excel_filename}..."
-        )
 
         actual_pv_kw = n.generators_t.p.loc[:, "PV_System"] * 1000
         theoretical_pv_kw = (
@@ -332,7 +326,7 @@ class SystemFeasibilityService:
 
         raw_soc_series = n.stores_t.e.loc[:, "BESS_reservoir"]
         physical_soc_kwh = raw_soc_series * 1000
-        physical_soc_pct = (raw_soc_series / config.BESS_CAPACITY_MWH) * 100.0
+        physical_soc_pct = (raw_soc_series / payload.bess_capacity_mwh) * 100.0
 
         bess_charging_kw = n.links_t.p0.loc[:, "BESS_charger"] * 1000
         bess_discharging_kw = -1 * n.links_t.p1.loc[:, "BESS_discharger"] * 1000
@@ -343,15 +337,15 @@ class SystemFeasibilityService:
         biogas_consumed_chp2_kw = n.links_t.p0.loc[:, "CHP_Biogas_Generator_2"] * 1000
 
         biogas_heater_consumed_kw = n.links_t.p0.loc[:, "Biogas_Backup_Heater"] * 1000
-        biogas_heater_consumed_m3_h = biogas_heater_consumed_kw / config.KWH_IN_M3_OF_BIOGAS
+        biogas_heater_consumed_m3_h = biogas_heater_consumed_kw / payload.kwh_in_m3_of_biogas
         heater_thermal_output_kw = n.links_t.p1.loc[:, "Biogas_Backup_Heater"] * 1000
 
         biogas_tank_store_kw = n.stores_t.e.loc[:, "Biogas_Storage_Tank"].diff().fillna(0) * 1000
-        biogas_tank_soc_m3 = (n.stores_t.e.loc[:, "Biogas_Storage_Tank"] * 1000) / config.KWH_IN_M3_OF_BIOGAS
+        biogas_tank_soc_m3 = (n.stores_t.e.loc[:, "Biogas_Storage_Tank"] * 1000) / payload.kwh_in_m3_of_biogas
         biogas_vented_kw = n.links_t.p0.loc[:, "Biogas_Emergency_Flare"] * 1000
 
         biogas_standing_losses_kw = n.stores_t.e.loc[:, "Biogas_Storage_Tank"] * 0.001 * 1000
-        biogas_standing_losses_m3_h = biogas_standing_losses_kw / config.KWH_IN_M3_OF_BIOGAS
+        biogas_standing_losses_m3_h = biogas_standing_losses_kw / payload.kwh_in_m3_of_biogas
 
         system_heat_vented_kw = n.links_t.p0.loc[:, "Heat_Emergency_Vent"] * 1000
 
@@ -362,7 +356,7 @@ class SystemFeasibilityService:
                 - biogas_tank_store_kw
         )
 
-        hourly_dispatch_df = pd.DataFrame(
+        hourly_dispatch_df = DataFrame(
             {
                 "Electrical_Demand_kW": n.loads_t.p.loc[:, "Electrical_Load"].values * 1000,
                 "Actual_PV_Generation_kW": -1 * actual_pv_kw.values,
@@ -371,10 +365,10 @@ class SystemFeasibilityService:
                 "Electrical_Surplus_Dumped_kW": electrical_surplus_dump_kw.values,
                 "CHP_Electrical_Output_kW": n.links_t.p1.loc[:, "CHP_Biogas_Generator"].values * 1000,
                 "Biogas_CHP_Input_kW": biogas_consumed_chp1_kw.values,
-                "Biogas_CHP_Input_m3_h": (biogas_consumed_chp1_kw / config.KWH_IN_M3_OF_BIOGAS).values,
+                "Biogas_CHP_Input_m3_h": (biogas_consumed_chp1_kw / payload.kwh_in_m3_of_biogas).values,
                 "CHP_2_Electrical_Output_kW": n.links_t.p1.loc[:, "CHP_Biogas_Generator_2"].values * 1000,
                 "Biogas_CHP_2_Input_kW": biogas_consumed_chp2_kw.values,
-                "Biogas_CHP_2_Input_m3_h": (biogas_consumed_chp2_kw / config.KWH_IN_M3_OF_BIOGAS).values,
+                "Biogas_CHP_2_Input_m3_h": (biogas_consumed_chp2_kw / payload.kwh_in_m3_of_biogas).values,
                 "Digester_Thermal_Load_Required_kW": n.loads_t.p.loc[:, "Digester_Thermal_Load"].values * 1000,
                 "Biogas_Heater_Input_kW": biogas_heater_consumed_kw.values,
                 "Biogas_Heater_Input_m3_h": biogas_heater_consumed_m3_h.values,
@@ -382,38 +376,17 @@ class SystemFeasibilityService:
                 "System_Thermal_Energy_Vented_kW": system_heat_vented_kw.values,
                 "Diesel_Electrical_Output_kW": (n.links_t.p1.loc[:, "Diesel_Generator"].values * 1000),
                 "Biogas_Digester_Production_kW": -1 * biogas_produced_kw.values,
-                "Biogas_Digester_Production_m3_h": ((-1 * biogas_produced_kw) / config.KWH_IN_M3_OF_BIOGAS).values,
+                "Biogas_Digester_Production_m3_h": ((-1 * biogas_produced_kw) / payload.kwh_in_m3_of_biogas).values,
                 "Biogas_Storage_Level_m3": biogas_tank_soc_m3.values,
                 "Biogas_Storage_Net_Flow_kW": biogas_tank_store_kw.values,
                 "Biogas_Emergency_Vented_kW": biogas_vented_kw.values,
-                "Biogas_Emergency_Vented_m3_h": (biogas_vented_kw / config.KWH_IN_M3_OF_BIOGAS).values,
+                "Biogas_Emergency_Vented_m3_h": (biogas_vented_kw / payload.kwh_in_m3_of_biogas).values,
                 "Biogas_Tank_Standing_Loss_kW": biogas_standing_losses_kw.values,
                 "Biogas_Tank_Standing_Loss_m3_h": biogas_standing_losses_m3_h.values,
                 "Biogas_Mass_Balance_Error_kW": biogas_mass_balance_error_kw.values,
                 "BESS_Power_Flow_kW": bess_raw_power_kw.values,
                 "BESS_State_of_Charge_kWh": physical_soc_kwh.values,
                 "BESS_State_of_Charge_Pct": physical_soc_pct.values,
-            },
-            index=n.snapshots,
-        ).round(2)
-
-        simplified_hourly_dispatch_df = pd.DataFrame(
-            {
-                "Odbiory Elektryczne": n.loads_t.p.loc[:, "Electrical_Load"].values * 1000,
-                "PV Użyte kW": -1 * actual_pv_kw.values,
-                "PV Maksymalna Predykcja kW": -1 * theoretical_pv_kw.values,
-                "PV Curtailment kW": curtailment_profile_kw.values,
-                "CHP Produkcja kW": n.links_t.p1.loc[:, "CHP_Biogas_Generator"].values * 1000,
-                "CHP Godzinne zużycie biogazu m3": (biogas_consumed_chp1_kw / config.KWH_IN_M3_OF_BIOGAS).values,
-                "CHP 2 Produkcja kW": n.links_t.p1.loc[:, "CHP_Biogas_Generator_2"].values * 1000,
-                "CHP 2 Godzinne zużycie biogazu": (biogas_consumed_chp2_kw / config.KWH_IN_M3_OF_BIOGAS).values,
-                "Kocioł Produkcja kW th": heater_thermal_output_kw.values,
-                "Nadmiar Energii Termalnej kW": system_heat_vented_kw.values,
-                "Diesel Produkcja kW": (n.links_t.p1.loc[:, "Diesel_Generator"].values * 1000),
-                "Poziom Zbiornika Biogazu m3": biogas_tank_soc_m3.values,
-                "BESS Przepływ kW (-ładowanie, +rozładowywanie)": bess_raw_power_kw.values,
-                "BESS SOC kWh": physical_soc_kwh.values,
-                "BESS SOC %": physical_soc_pct.values,
             },
             index=n.snapshots,
         ).round(2)
@@ -501,7 +474,7 @@ class SystemFeasibilityService:
 
         chps_conversion_losses_mwh = abs(biogas_cons_chp1_mwh) + abs(biogas_cons_chp2_mwh) - (
                     abs(chp_mwh) + abs(chp2_mwh) + (
-                        abs(biogas_cons_chp1_mwh + biogas_cons_chp2_mwh) * config.CHP_THERMAL_EFFICIENCY))
+                        abs(biogas_cons_chp1_mwh + biogas_cons_chp2_mwh) * payload.chp_thermal_efficiency))
         boiler_conversion_losses_mwh = abs(biogas_heater_mwh) - abs(heater_heat_output_mwh)
 
         bess_conversion_losses_mwh = abs(bess_losses_mwh)
@@ -554,30 +527,10 @@ class SystemFeasibilityService:
             ("Electrical Grid Data Integrity Check Status", elec_balance_status),
             ("Total Combined Network Energy Balance Closure Error (MWh)", absolute_total_energy_error_mwh),
             ("Comprehensive System Energy Integrity Check Status", total_energy_balance_status)]
-        summary_df = pd.DataFrame(summary_data, columns=["Performance Metric", "Annual Value"]).round(4)
+        summary_df = DataFrame(summary_data, columns=["Performance Metric", "Annual Value"]).round(4)
 
-        simplified_summary_data = [
-            ("Roczne odbiory elektryczne (MWh)", demand_mwh),
-            ("Roczny odbiór termalny (fermentator) (MWh)", thermal_demand_mwh),
-            ("Roczna nadprodukcja energii termalnej - zużyta/zrzucona poprzez kocioł (MWh)", thermal_vented_mwh),
-            ("Roczna produkcja energii termalnej (MWh)", total_useful_thermal_output_mwh),
-            ("PV Roczna Predykcja (MWh)", float(theoretical_pv_kw.values.sum() / 1000)),
-            ("PV Roczne Zużycie (MWh)", pv_mwh),
-            ("PV Roczny Curtailment (MWh)", float(curtailment_profile_kw.values.sum() / 1000)),
-            ("CHP Produkcja roczna (MWh)", chp_mwh),
-            ("CHP 2 Produkcja roczna (MWh)", chp2_mwh),
-            ("Diesel Produkcja roczna (MWh)", diesel_mwh),
-            ("Roczna produkcja biogazu (m³)", biogas_prod_m3),
-            ("CHP Roczne zużycie biogazu (m³)", biogas_cons_chp1_m3),
-            ("CHP 2 Roczne zużycie biogazu (m³)", biogas_cons_chp2_m3),
-            ("Kocioł Roczne zużycie biogazu (m³)", biogas_heater_m3),
-            ("Biogaz spalony w pochodni (m³)", biogas_flare_m3),
-            ("Energia wysłana do BESS (MWh)", total_mwh_to_bess),
-            ("Energia pobrana z BESS (MWh)", total_mwh_from_bess),
-            ("Energia stracona w BESS (efektywność) (MWh)", bess_losses_mwh)]
-        simplified_summary_df = pd.DataFrame(simplified_summary_data, columns=["Metryka", "Roczna Wartość"]).round(4)
-
-        with pd.ExcelWriter('generation_profiles/' + excel_filename, engine="openpyxl") as writer:
+        full_report = io.BytesIO()
+        with ExcelWriter(full_report, engine="openpyxl") as writer:
             summary_df.to_excel(writer, sheet_name="Annual_Summary", index=False)
             hourly_dispatch_df.to_excel(writer, sheet_name="Hourly_Dispatch", index=True)
             ws_hourly = writer.sheets["Hourly_Dispatch"]
@@ -593,23 +546,6 @@ class SystemFeasibilityService:
                 else:
                     formula = f"=SUM({col_letter}{first_data_row}:{col_letter}{last_data_row})"
                 ws_hourly.cell(row=summary_row, column=col_idx, value=formula)
-
-        with pd.ExcelWriter('generation_profiles/simplified_' + excel_filename, engine="openpyxl") as writer:
-            simplified_summary_df.to_excel(writer, sheet_name="Roczny raport", index=False)
-            simplified_hourly_dispatch_df.to_excel(writer, sheet_name="Bilans godzinowy", index=True)
-            ws_hourly = writer.sheets["Bilans godzinowy"]
-            first_data_row = 2
-            last_data_row = len(simplified_hourly_dispatch_df) + 1
-            summary_row = last_data_row + 1
-            ws_hourly.cell(row=summary_row, column=1, value="Podsumowanie (Suma/Średnia)")
-            for col_idx in range(2, ws_hourly.max_column + 1):
-                col_letter = get_column_letter(col_idx)
-                header_name = ws_hourly.cell(row=1, column=col_idx).value
-                if "SOC" in header_name or "Poziom Zbiornika Biogazu m3" in header_name:
-                    formula = f"=AVERAGE({col_letter}{first_data_row}:{col_letter}{last_data_row})"
-                else:
-                    formula = f"=SUM({col_letter}{first_data_row}:{col_letter}{last_data_row})"
-                ws_hourly.cell(row=summary_row, column=col_idx, value=formula)
-
-        print(f"Annual report generated successfully with full Bus-Link-Bus-Store symmetry alignment!")
+        full_report.seek(0)
+        return full_report
 

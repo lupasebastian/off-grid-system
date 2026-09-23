@@ -1,10 +1,38 @@
+from datetime import datetime
+
+import openmeteo_requests
 import pandas as pd
 import numpy as np
+import pvlib
 
-import config
+from app.api.schemas.prediction_schemas import PredictionRequest
 
 
-def generate_demand(snapshots):
+async def fetch_hourly_weather_data(payload: PredictionRequest):
+    openmeteo = openmeteo_requests.Client()
+
+    # TODO maybe add another forecast model and average results?
+    params = {
+        "latitude": payload.latitude,
+        "longitude": payload.longitude,
+        "hourly": ["shortwave_radiation", "direct_normal_irradiance", "diffuse_radiation", "temperature_2m",
+                   "wind_speed_10m"],
+        "timezone": "auto",
+        "wind_speed_unit": "ms",
+        "start_date": datetime.fromisoformat(payload.start).date(),
+        "end_date": datetime.fromisoformat(payload.end).date()
+    }
+
+    url = payload.weather_api_url
+
+    responses = openmeteo.weather_api(url, params=params)
+
+    response = responses[0]
+
+    return response.Hourly()
+
+
+def generate_demand(snapshots, demand_per_building_mwh_annually, num_buildings):
     df = pd.DataFrame(index=snapshots)
 
     daily_hours = np.arange(24)
@@ -23,7 +51,7 @@ def generate_demand(snapshots):
     noise = np.random.normal(1.0, 0.10, len(snapshots))
     combined_profile = raw_profile * noise
 
-    demand_profile = (combined_profile / combined_profile.sum()) * config.DEMAND_PER_BUILDING_MWH_ANNUALLY * config.NUM_BUILDINGS
+    demand_profile = (combined_profile / combined_profile.sum()) * demand_per_building_mwh_annually * num_buildings
     return demand_profile
 
 
